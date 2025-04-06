@@ -1,0 +1,22 @@
+dist
+*.egg-info
+*.egg
+__pycache__
+*.pyc
+.ipynb_checkpoints
+checkpoints
+good models
+*(old).ipynb
+.env
+.env
+tensorboard
+wandb
+gs:
+gcs_mount
+datacache
+*.deb
+gcsfuse.yml
+*.csv
+*.tsv
+*.parquet
+*.arrow
