@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import mediapipe as mp
 from einops import rearrange
 from typing import List, Union, Tuple, Dict, Optional
 import os
@@ -9,6 +8,13 @@ from tqdm import tqdm
 import logging
 import traceback
 from matplotlib import pyplot as plt
+
+try:
+    import mediapipe as mp
+except ImportError:
+    # Install MediaPipe if not already installed
+    os.system("pip install mediapipe")
+    import mediapipe as mp
 
 class FaceAlignmentProcessor:
     """
@@ -22,7 +28,9 @@ class FaceAlignmentProcessor:
                  static_image_mode: bool = False,
                  max_num_faces: int = 1,
                  min_detection_confidence: float = 0.5,
-                 min_tracking_confidence: float = 0.5):
+                 min_tracking_confidence: float = 0.5,
+                 use_mediapipe: bool = True,
+                 ):
         """
         Initialize the FaceAlignmentProcessor.
         
@@ -37,14 +45,22 @@ class FaceAlignmentProcessor:
         self.resolution = resolution
         self.device = device
         
-        # Initialize MediaPipe face mesh
-        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=static_image_mode,
-            max_num_faces=max_num_faces,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-            refine_landmarks=True,
-        )
+        self.use_mediapipe = use_mediapipe
+        
+        if use_mediapipe:
+            # Initialize MediaPipe face mesh
+            self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=static_image_mode,
+                max_num_faces=max_num_faces,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+                refine_landmarks=True,
+            )
+        else:
+            import face_alignment
+            self.face_mesh = face_alignment.FaceAlignment(
+                    face_alignment.LandmarksType.TWO_D, flip_input=False, device=device
+                )
         
         # Initialize laplacian smoother and affine restorer
         self.smoother = laplacianSmooth()
@@ -62,13 +78,18 @@ class FaceAlignmentProcessor:
         ]
         self.lock = threading.Lock()
         
-    def __detect_landmarks__(self, image: np.ndarray, retries: int = 4):
-        results = self.face_mesh.process(image)
-        
-        if not results.multi_face_landmarks:  # Face not detected
+    def __detect_landmarks__(self, image: np.ndarray, return_2d, retries: int = 4):
+        height, width = image.shape[:2]
+        if self.use_mediapipe:
+            results = self.face_mesh.process(image)
+            detected_faces = results.multi_face_landmarks
+        else:
+            detected_faces = self.face_mesh.get_landmarks(image)
+            
+        if not detected_faces:  # Face not detected
             if retries > 0:
                 # Retry detection
-                return self.__detect_landmarks__(image, retries - 1)
+                return self.__detect_landmarks__(image, return_2d, retries - 1)
             # else:
                 # No face detected after retries
                 # logging.warning("Face not detected after retries.")
@@ -77,8 +98,26 @@ class FaceAlignmentProcessor:
                 # plt.axis('off')
                 # plt.show()
             raise RuntimeError("Face not detected")
+        
+        face_landmarks = detected_faces[0]  # Only use the first face
+        if self.use_mediapipe:
+        
+            # Extract landmark coordinates
+            landmark_coordinates = []
+            for landmark in face_landmarks.landmark:
+                x = landmark.x * width
+                y = landmark.y * height
+                z = landmark.z * width  # Scale Z relative to image width
+                
+                if return_2d:
+                    landmark_coordinates.append((x, y))
+                else:
+                    landmark_coordinates.append((x, y, z))
+                    
+            landmark_coordinates = np.array(landmark_coordinates)
             
-        face_landmarks = results.multi_face_landmarks[0]  # Only use the first face
+            # Convert to face_alignment format if requested
+            face_landmarks = self.convert_to_face_alignment_format(landmark_coordinates)
         return face_landmarks
         
     def detect_face(self,
@@ -98,8 +137,7 @@ class FaceAlignmentProcessor:
     
     def detect_landmarks(self, 
                          image: Union[np.ndarray], 
-                         return_2d: bool = True,
-                         convert_to_fa_format: bool = True) -> Optional[np.ndarray]:
+                         return_2d: bool = True) -> Optional[np.ndarray]:
         """
         Detect facial landmarks in the given image.
         
@@ -111,25 +149,7 @@ class FaceAlignmentProcessor:
         Returns:
             Array of landmark coordinates or None if no face detected.
         """
-        height, width = image.shape[:2]
-        face_landmarks = self.__detect_landmarks__(image)
-        # Extract landmark coordinates
-        landmark_coordinates = []
-        for landmark in face_landmarks.landmark:
-            x = landmark.x * width
-            y = landmark.y * height
-            z = landmark.z * width  # Scale Z relative to image width
-            
-            if return_2d:
-                landmark_coordinates.append((x, y))
-            else:
-                landmark_coordinates.append((x, y, z))
-                
-        landmark_coordinates = np.array(landmark_coordinates)
-        
-        # Convert to face_alignment format if requested
-        if convert_to_fa_format:
-            return self.convert_to_face_alignment_format(landmark_coordinates)
+        landmark_coordinates = self.__detect_landmarks__(image, return_2d)
             
         return landmark_coordinates
     
@@ -145,47 +165,42 @@ class FaceAlignmentProcessor:
         """
         landmarks_extracted = []
         for index in self.landmark_points_68:
-            if index < len(landmarks):
-                if landmarks.shape[1] == 2:
-                    landmarks_extracted.append((landmarks[index][0], landmarks[index][1]))
-                else:
-                    landmarks_extracted.append((landmarks[index][0], landmarks[index][1]))
-        
+            x = landmarks[index][0]
+            y = landmarks[index][1]
+            landmarks_extracted.append((x, y))
         return np.array(landmarks_extracted)
-    
+        
     def get_aligned_faces(self, 
-                         image: Union[np.ndarray],
-                         old_state: Optional[Dict] = {},
-                         return_box: bool = False,
-                         return_matrix: bool = False,
-                         upscale_interpolation=cv2.INTER_CUBIC,
-                         downscale_interpolation=cv2.INTER_AREA,
+                        image: Union[np.ndarray],
+                        old_state: Optional[Dict] = {},
+                        return_box: bool = False,
+                        return_matrix: bool = False,
+                        upscale_interpolation=cv2.INTER_CUBIC,
+                        downscale_interpolation=cv2.INTER_AREA,
+                        debug_visualization: bool = True,
+                        debug_save_path: Optional[str] = None,
                         ) -> Union[np.ndarray, Tuple]:
         """
         Detect face and return aligned face.
         
         Args:
             image: Input image
+            old_state: Previous state for smooth tracking
             return_box: Whether to return the face bounding box
             return_matrix: Whether to return the affine transformation matrix
+            upscale_interpolation: Interpolation method for upscaling
+            downscale_interpolation: Interpolation method for downscaling
+            debug_visualization: Whether to visualize landmarks for debugging
+            debug_save_path: Path to save the debug visualization
             
         Returns:
             Aligned face image, and optionally bounding box and affine matrix
         """
-        # image = image.copy()
-        # Ensure we have a contiguous copy of the image for modification
-        # image_copy = image.copy()
-        
+        image = cv2.resize(image, (self.resolution, self.resolution), interpolation=cv2.INTER_LINEAR)
         # Get landmarks in face_alignment format
-        landmarks = self.detect_landmarks(image, return_2d=True, convert_to_fa_format=True)
+        landmarks = self.detect_landmarks(image, return_2d=True)
         
         if landmarks is None:
-            # print(f"No face detected in the image of length {len(image)}")
-            # In this case, for debugging, lets plot the image
-            # from matplotlib import pyplot as plt
-            # plt.imshow(image)
-            # plt.axis('off')
-            # plt.show()
             raise RuntimeError("Face not detected")
         
         # Apply Laplacian smoothing to landmarks
@@ -193,9 +208,17 @@ class FaceAlignmentProcessor:
         
         # Calculate reference points for alignment
         lmk3_ = np.zeros((3, 2))
-        lmk3_[0] = points[17:22].mean(0)  # Left eye region
-        lmk3_[1] = points[22:27].mean(0)  # Right eye region
-        lmk3_[2] = points[27:36].mean(0)  # Nose region
+        # lmk3_[0] = points[17:22].mean(0)  # Left eye region
+        # lmk3_[1] = points[22:27].mean(0)  # Right eye region
+        # lmk3_[2] = points[27:36].mean(0)  # Nose region
+        
+        lmk3_[0] = landmarks[36:42].mean(0)  # Left eye region
+        lmk3_[1] = landmarks[42:48].mean(0)  # Right eye region
+        lmk3_[2] = landmarks[27:36].mean(0)  # Nose region
+        
+        # Debug visualization if requested
+        if debug_visualization:
+            image = self.visualize_alignment_landmarks(image, points, save_path=debug_save_path)
         
         # Align and warp the face
         face, affine_matrix, p_bias = self.restorer.align_warp_face(
@@ -229,7 +252,7 @@ class FaceAlignmentProcessor:
             return face, affine_matrix, state
         else:
             return face, state
-        
+            
     def process_frames(self, frames: List[np.ndarray], break_on_error: bool = False) -> List[np.ndarray]:
         """
         Process a list of frames and extract aligned faces.
@@ -294,6 +317,90 @@ class FaceAlignmentProcessor:
         """
         if self.face_mesh:
             self.face_mesh.close()
+
+    def visualize_alignment_landmarks(self, image, landmarks, save_path=None, show=True):
+        """
+        Visualize the specific landmarks used for face alignment.
+        
+        Args:
+            image: Input image
+            landmarks: Full set of facial landmarks
+            save_path: Optional path to save the visualization
+            show: Whether to display the visualization
+            
+        Returns:
+            Visualization image with landmarks drawn
+        """
+        # Create a copy of the image for drawing
+        vis_image = image.copy()
+    
+        # # Scale landmarks to the image size
+        # height, width = vis_image.shape[:2]
+        # landmarks = landmarks * np.array([width, height])
+        # landmarks = landmarks.astype(int)
+        
+        # Draw all landmarks as small dots
+        for i, (x, y) in enumerate(landmarks):
+            cv2.circle(vis_image, (int(x), int(y)), 1, (0, 255, 0), -1)
+            # Label every landmark with its index
+            cv2.putText(vis_image, str(i), (int(x), int(y)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+        
+        # Extract the specific landmark regions used for alignment
+        # left_eye_region = landmarks[17:22]  # Left eye region
+        # right_eye_region = landmarks[22:27]  # Right eye region
+        # nose_region = landmarks[27:36]  # Nose region
+        
+        left_eye_region = landmarks[36:42]  # Left eye region
+        right_eye_region = landmarks[42:48]  # Right eye region
+        nose_region = landmarks[27:36]  # Nose region
+        
+        # Calculate the mean points used for alignment
+        left_eye_center = np.mean(left_eye_region, axis=0).astype(int)
+        right_eye_center = np.mean(right_eye_region, axis=0).astype(int)
+        nose_center = np.mean(nose_region, axis=0).astype(int)
+        
+        # # Draw the specific regions with different colors
+        for point in left_eye_region:
+            cv2.circle(vis_image, (int(point[0]), int(point[1])), 2, (255, 0, 0), -1)  # Blue for left eye
+        
+        for point in right_eye_region:
+            cv2.circle(vis_image, (int(point[0]), int(point[1])), 2, (0, 0, 255), -1)  # Red for right eye
+        
+        for point in nose_region:
+            cv2.circle(vis_image, (int(point[0]), int(point[1])), 2, (0, 255, 255), -1)  # Yellow for nose
+        
+        # Draw the mean points (centers) used for alignment with larger circles
+        cv2.circle(vis_image, tuple(left_eye_center), 5, (255, 0, 0), 2)  # Blue circle for left eye center
+        cv2.circle(vis_image, tuple(right_eye_center), 5, (0, 0, 255), 2)  # Red circle for right eye center
+        cv2.circle(vis_image, tuple(nose_center), 5, (0, 255, 255), 2)  # Yellow circle for nose center
+        
+        # # Draw lines connecting the alignment points to show the triangle
+        cv2.line(vis_image, tuple(left_eye_center), tuple(right_eye_center), (255, 255, 0), 2)
+        cv2.line(vis_image, tuple(left_eye_center), tuple(nose_center), (255, 255, 0), 2)
+        cv2.line(vis_image, tuple(right_eye_center), tuple(nose_center), (255, 255, 0), 2)
+        
+        # Add text labels
+        cv2.putText(vis_image, "Left Eye", (left_eye_center[0]-20, left_eye_center[1]-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+        cv2.putText(vis_image, "Right Eye", (right_eye_center[0]-20, right_eye_center[1]-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        cv2.putText(vis_image, "Nose", (nose_center[0]-20, nose_center[1]-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        
+        # Show the image if requested
+        if show:
+            plt.figure(figsize=(12, 10))
+            plt.imshow(cv2.cvtColor(vis_image, cv2.COLOR_BGR2RGB))
+            plt.axis('off')
+            plt.title('Face Alignment Landmarks')
+            plt.show()
+        
+        # # Save the image if a path is provided
+        # if save_path:
+        #     cv2.imwrite(save_path, vis_image)
+        return vis_image
+    
 
 import numpy as np
 

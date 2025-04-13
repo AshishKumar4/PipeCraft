@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 from typing import Iterator
-from utils import logger
+from pipecraft.utils import logger
 from typing import Iterator, TypeVar, Generic, Type, get_args, get_origin, Iterable
 import threading
 import queue
-from sources import DataSource
+from pipecraft.sources import DataSource
 from typing import TypeVar, Generic, Callable
 
 InputDataFrame = TypeVar("DataInputDataFrameFrame")
@@ -31,6 +31,8 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
         self._source_idx = 0
         self.on_success = on_success
         self.on_error = on_error
+        self.success_count = 0
+        self.failure_count = 0
         super().__init__(*args, **kwargs)
 
     def __set_property_types__(self) -> None:
@@ -50,6 +52,9 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
                         self.dataframe_class = args[-1]
                         break
         # print(f"DataProcessor: Detected DataFrame class: {self.dataframe_class}")
+    
+    def __len__(self) -> int:
+        return sum([len(src) for src in self.sources])
         
     @abstractmethod
     def process(self, data: InputDataFrame, threadId) -> OutputDataFrame:
@@ -92,13 +97,17 @@ class DataProcessor(DataSource[OutputDataFrame], Generic[InputDataFrame, OutputD
 
             # Transform the raw_data
             processed = self.process(raw_data, threadId=threadId)
-            if processed:
+            if processed is not None:
+                self.success_count += 1
                 if self.on_success:
                     # Call the success callback if provided
-                    self.on_success(processed)
-            elif self.on_error:
+                    success_rate = self.success_count / (1e-6 + self.success_count + self.failure_count)
+                    self.on_success(processed, success_rate)
+            else:
+                self.failure_count += 1
                 # Call the error callback if provided
-                self.on_error(raw_data)
+                if self.on_error:
+                    self.on_error(raw_data)
             return processed
 
         # If we get here, all sources are exhausted:

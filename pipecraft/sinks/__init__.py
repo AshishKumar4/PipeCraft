@@ -1,15 +1,14 @@
 from abc import ABC, abstractmethod
 from typing import Iterator
-from utils import logger
+from pipecraft.utils import logger
 from typing import Iterator, TypeVar, Generic, Type, get_args, get_origin, Iterable
 import threading
 import queue
-from sources import DataSource
-from processors import DataProcessor
+from pipecraft.sources import DataSource
+from pipecraft.processors import DataProcessor
 from abc import ABC, abstractmethod
 from typing import Iterable, TypeVar, Generic
-from sources import DataSource
-
+from tqdm import tqdm
 
 InputDataFrame = TypeVar("DataInputDataFrameFrame")
 
@@ -30,6 +29,12 @@ class DataSink(DataProcessor[InputDataFrame, None], ABC):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        source_len = self.__len__()
+        self._progress_bar = None
+        if source_len is not None:
+            # Initialize tqdm progress bar
+            print(f"[DataSource: {self.__class__.__name__}] Detected source length: {source_len}")
+            self._progress_bar = tqdm(total=source_len, desc=self.__class__.__name__, unit="item")
     
     @abstractmethod
     def write(self, data: InputDataFrame, threadId) -> None:
@@ -47,4 +52,7 @@ class DataSink(DataProcessor[InputDataFrame, None], ABC):
         to pass something downstream; otherwise, the sink side effect is enough.
         """
         self.write(data, threadId=threadId)
+        with self.lock:
+            if self._progress_bar is not None:
+                self._progress_bar.update(1)
         return None

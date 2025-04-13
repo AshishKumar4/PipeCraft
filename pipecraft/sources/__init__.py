@@ -4,9 +4,9 @@ import threading
 import queue
 import os
 import traceback
-import psutil # Added
 from typing import TypeVar, Generic, Optional, List 
 import time
+from tqdm import tqdm
 
 DataFrame = TypeVar("DataFrame")
 
@@ -23,7 +23,8 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
         buffer_size: int = None,
         num_workers: int = None,
         verbose: bool = False,
-        assigned_cores: Optional[List[int]] = None # Added: Cores assigned to this source's process
+        assigned_cores: Optional[List[int]] = None, # Added: Cores assigned to this source's process
+        **kwargs,
     ) -> None:
         super().__init__()
         self.verbose = verbose
@@ -43,7 +44,8 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
         self._stop_event = threading.Event()
         self._threads = []
         self._closed = False
-            
+        self.lock = threading.Lock()
+        
     def __set_property_types__(self) -> None:
         self.dataframe_class = None
         # Try to extract from __orig_class__:
@@ -115,6 +117,14 @@ class DataSource(Generic[DataFrame], Iterator[DataFrame], ABC):
 
         if self.verbose:
             print(f"[DataSource] Worker thread {threadId} stopping.")
+    
+    @abstractmethod
+    def __len__(self) -> int:
+        """
+        Return the maximum number of items this source can provide.
+        """
+        pass
+            
     @abstractmethod
     def fetch(self, threadId) -> DataFrame:
         """

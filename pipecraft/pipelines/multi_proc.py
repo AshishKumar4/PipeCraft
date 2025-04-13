@@ -4,7 +4,7 @@ import os
 import gc
 import traceback
 from typing import List, Optional
-from utils import get_cpu_assignments_numa, get_local_partition
+from pipecraft.utils.concurrent import get_cpu_assignments_numa, get_local_partition
 
 
 # Modified function to accept core assignments and pin the process
@@ -95,7 +95,7 @@ def run_pipeline_proc(
         pipeline(
             rank=rank,
             world_size=world_size,
-            num_workers_per_process=actual_num_workers, # Use actual number of workers
+            num_workers=actual_num_workers, # Use actual number of workers
             wandb_run=wandb_run,
             assigned_cores=assigned_cores, # Pass the assigned cores
             verbose=verbose,
@@ -167,16 +167,17 @@ def run_pipeline(
 
 
             # local_paths = get_local_partition(video_paths, num_processes, rank)
+            local_opts = dict(pipeline_opts) # Copy the pipeline options
             for key in pipeline_opts:
                 if type(pipeline_opts[key]) == list:
                     # Split the list into chunks for each process
                     local_objs = get_local_partition(pipeline_opts[key], num_processes, rank)
-                    pipeline_opts[key] = local_objs
+                    local_opts[key] = local_objs
                     print(f"Rank {rank}: {key} has {len(local_objs)} items out of {len(pipeline_opts[key])} total.")
             print(f"Submitting Rank {rank}: Workers={workers_for_rank}, Cores={assigned_cores_for_rank}")
             futures.append(executor.submit(
                 run_pipeline_proc,
-                pipeline_opts=pipeline_opts,
+                pipeline_opts=local_opts,
                 pipeline=pipeline,
                 rank=rank,
                 world_size=num_processes,
